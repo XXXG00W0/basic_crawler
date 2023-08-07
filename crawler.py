@@ -20,12 +20,22 @@ import pyautogui, pyperclip, pytesseract, cv2, dominate
 from dominate.tags import *
 from dominate.util import raw
 
-class MaxWaitTimeReached(Exception):
-    pass
-
 class Crawler:
 
-    def __init__(self, cfg, webpage, stop_crawler_signal=False):
+    class MaxWaitTimeReached(Exception):
+        pass
+
+    def __init__(self, cfg: dict, webpage: str, stop_crawler_signal=False):
+        """__init__函数, 处理浏览器的启动参数
+
+        Args:
+            cfg (dict): 存储浏览器所需参数的字典
+            webpage (str): 爬取的网页
+            stop_crawler_signal (bool, optional): 多线程下, 该值用于停止当前爬虫线程; 如果该值为真, 该类内的函数会立即 raise MaxWaitTimeReached. Defaults to False.
+
+        Raises:
+            NotImplementedError: 当前仅支持 Edge 和 Chrome 浏览器
+        """
         self.stop_crawler_signal = stop_crawler_signal
         self.cfg = cfg
         self.webpage = webpage
@@ -33,6 +43,12 @@ class Crawler:
         if self.cfg['浏览器'].lower() == "edge":
             option = webdriver.EdgeOptions()
             option.add_argument(f"--user-data-dir={self.cfg['edge用户文件']}")
+            option.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36')
+            option.add_experimental_option('excludeSwitches', ['enable-automation'])
+            option.add_experimental_option('useAutomationExtension', False)
+            self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+            })
             self.driver = webdriver.Edge(options=option)
         elif self.cfg['浏览器'].lower() == "chrome":
             option = webdriver.ChromeOptions()
@@ -51,7 +67,11 @@ class Crawler:
         self.start_crawler()
 
     def set_logger(self, logger_name='logger'):
-        
+        """设置日志记录器
+
+        Args:
+            logger_name (str, optional): 日志名. Defaults to 'logger'.
+        """
         self.log_path = self.cfg['log']
         if not Path(self.log_path).exists():
             os.mkdir(self.log_path)
@@ -197,7 +217,7 @@ class Crawler:
                 # print(self.stop_task, self.refresh_if_timeout)
                 if self.stop_crawler_signal:
                     self.logger.error(f'超时: {element}')
-                    raise MaxWaitTimeReached
+                    raise self.MaxWaitTimeReached
 
     def wait_input_field_and_enter(self, find_by, element, text, clear=True, timeout=-1, wait_time=30, err_msg='搜索输入框超时，稍后再试'):
         timer: threading.Timer = self.start_timer(wait_time)
@@ -227,7 +247,7 @@ class Crawler:
                 # print(self.stop_task, self.refresh_if_timeout)
                 if self.stop_crawler_signal:
                     self.logger.error(f'超时: {element}')
-                    raise MaxWaitTimeReached
+                    raise self.MaxWaitTimeReached
 
     def wait_and_return_element(self, find_by, element, timeout=-1, err_msg='【返回元素】等待元素超时，稍后再试'):
         if timeout == -1:
@@ -281,7 +301,27 @@ class Crawler:
                 # print(self.stop_task, self.refresh_if_timeout)
                 if self.stop_crawler_signal:
                     self.logger.error(f'超时: {element}')
-                    raise MaxWaitTimeReached
+                    raise self.MaxWaitTimeReached
+
+    def wait_and_return_elements_with_patience(self, find_by, element, timeout=-1, patience=3, err_msg='<返回非空元素> 等待元素超时，稍后再试'):
+        if patience <= 0:
+            patience = 3
+        if timeout == -1:
+            timeout = self.timeout(0.25, 0.5)
+        for attempt in range(patience):
+            try:
+                # time.sleep(timeout)
+                self.logger.debug(f'第 {attempt} 次尝试 / 共 {patience} 次')
+                WebDriverWait(self.driver, timeout).until(EC.presence_of_element_located((find_by, element)))
+                webElements = self.driver.find_elements(find_by, element)
+            except selenium.common.TimeoutException:
+                self.logger.error(f'{err_msg}: {element}')
+            except UnexpectedAlertPresentException:
+                self.wait_alert_and_handle()
+            else:
+                return webElements
+        self.logger.error(f'返回空 未找到 {element}')
+        return []
 
     def wait_till_non_empty_element(self, find_by, element, timeout=-1, wait_time=30, err_msg='等待非空元素超时，稍后再试'):
         timer: threading.Timer = self.start_timer(wait_time)
@@ -307,7 +347,7 @@ class Crawler:
                 # print(self.stop_task, self.refresh_if_timeout)
                 if self.stop_crawler_signal:
                     self.logger.error(f'超时: {element}')
-                    raise MaxWaitTimeReached
+                    raise self.MaxWaitTimeReached
 
     def wait_and_download(self, url, path, timeout=-1, patience=3):
         if timeout == -1:
@@ -343,8 +383,15 @@ class Crawler:
                 # print(self.stop_task, self.refresh_if_timeout)
                 if self.stop_crawler_signal:
                     self.logger.error(f'超时: {element}')
-                    raise MaxWaitTimeReached
-    
+                    raise self.MaxWaitTimeReached
+                
+    def close_window(self):
+        try:
+            self.driver.close()
+        # 尝试关闭窗口超时, 通常是因为JavaScript弹窗
+        except selenium.common.exceptions.WebDriverException:
+            self.wait_alert_and_handle(choice='yes')
+
     def randomize_tags(self, tags: list) ->str:
         '''随机打乱一级列表的标签并串联起来返回字串'''
         random.shuffle(tags)
